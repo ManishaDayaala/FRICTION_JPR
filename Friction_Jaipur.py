@@ -225,190 +225,85 @@ if st.button('Preprocess Data'):
 
 
 
-###########################                                    #######################################
 
-# Use an expander to provide breakdown code information
-with st.expander("Breakdown Classification and Codes", expanded=True):
-    st.markdown("""
-    Each breakdown type is assigned a unique code to simplify identification. Here’s what each code represents:
-
-    - **Code 1: carriage gripper,carriage guide pin,carriage roller,carriage hydraulic oil lekage,exit pinch**  
-      Issues specifically related to the carriage gripper,carriage guide pin,carriage roller,carriage hydraulic oil lekage,exit pinch of the machine.
-    
-    - **Code 2: whip shell hydraulic cylinder, whip shell roller**  
-      Covers problems with the whip shell hydraulic cylinder or whip shell roller.
-    
-    """)
 
 ##########################  Classification ###############################
 
-import tensorflow as tf
-import random
+# 🚀 Install if not already done:
+# pip install pandas numpy scikit-learn xgboost imbalanced-learn tensorflow joblib streamlit openpyxl
+
 import streamlit as st
-import os
-import pandas as pd
 import numpy as np
+import pandas as pd
 import joblib
+import tensorflow as tf
+import os
+import random
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report
 from imblearn.over_sampling import SMOTE
-import xgboost as xgb
-from scikeras.wrappers import KerasClassifier
+from xgboost import XGBClassifier
 from sklearn.ensemble import VotingClassifier
+from scikeras.wrappers import KerasClassifier
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
+from collections import Counter
 
-# Set random seed for reproducibility
+# ---------------------
+# ⚙️ Set random seed
+# ---------------------
 def set_random_seed(seed=42):
     np.random.seed(seed)
-    random.seed(seed)
     tf.random.set_seed(seed)
+    random.seed(seed)
+# ---------------------
+# 🔮 Prediction Function
+# ---------------------
+def predict_future_breakdown(test_file_path, model_folder_path):
+    set_random_seed(seed=42)
+    df = pd.read_excel(test_file_path)
+    X = df.iloc[:, 3:-1].values  # All features
 
-# Define the training function
-def train_ensemble_model(training_file_path, model_folder_path):
-    def load_data(file_path):
-        df = pd.read_excel(file_path)
-        X = df.iloc[:, 3:-1].values  # Features (assuming columns 3 to second last)
-        y = df.iloc[:,-1].values 
-        #y = df['Code'].values  # Target column
-        return X, y
+    scaler = joblib.load(os.path.join(model_folder_path, "scaler_shifted.pkl"))
+    X_scaled = scaler.transform(X)
 
-    def preprocess_data(X, y):
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        # Save the scaler
-        joblib.dump(scaler, os.path.join(model_folder_path, "scaler_frictionjpr.pkl"))
+    model = joblib.load(os.path.join(model_folder_path, "ensemble_shifted_model.pkl"))
+    preds = model.predict(X_scaled)
 
-        # Split into training and validation sets
-        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42, shuffle=True)
+    labels = ["Code 0", "Code 1", "Code 2"]
+    result_labels = [labels[p] for p in preds]
 
-        # Check class distribution
-        unique_classes, class_counts = np.unique(y_train, return_counts=True)
-        min_class_samples = min(class_counts)  # Minimum class sample count
+    non_zero = [lbl for lbl in result_labels if lbl != "Code 0"]
+    if non_zero:
+        return f"🚨 Potential Breakdown(s): {', '.join(set(non_zero))}"
+    else:
+        return "✅ No BD predicted"
 
-        # Adjust `n_neighbors` to avoid errors in SMOTE
-        n_neighbors = min(5, min_class_samples - 1) if min_class_samples > 1 else 1
-
-        try:
-            smote = SMOTE(random_state=42, k_neighbors=n_neighbors)
-            X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
-        except ValueError as e:
-            st.warning(f"SMOTE failed: {e}. Using original training data instead.")
-            X_resampled, y_resampled = X_train, y_train  # Fall back to original data if SMOTE fails
-        
-        return X_resampled, X_test, y_resampled, y_test
-
-    def build_nn_model():
-        model = Sequential()
-        model.add(Dense(128, activation='relu', input_shape=(X_resampled.shape[1],)))
-        model.add(Dropout(0.2))
-        model.add(Dense(64, activation='relu'))
-        model.add(Dropout(0.2))
-        model.add(Dense(32, activation='relu'))
-        model.add(Dense(3, activation='softmax'))  # 4 output units for the 4 classes
-        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])  # Use sparse_categorical_crossentropy
-        return model
-
-    # Set random seed
-    set_random_seed()
-
-    # Load and preprocess data
-    X, y = load_data(training_file_path)
-    X_resampled, X_test, y_resampled, y_test = preprocess_data(X, y)
-
-    # Class weights for Keras model
-    class_weights = {0: 0.1, 1: 700, 2: 800 }
-
-    # Build Keras model
-    nn_model = KerasClassifier(model=build_nn_model, epochs=100, batch_size=32, verbose=0, class_weight=class_weights)
-
-    # Calculate sample weights for XGBoost
-    sample_weights = np.array([class_weights[int(label)] for label in y_resampled])
-
-    # XGBoost model
-    xgb_model = xgb.XGBClassifier(objective='multi:softmax', num_class=3, eval_metric='mlogloss', sample_weight=sample_weights, random_state=42)
-
-    # Ensemble model
-    ensemble_model = VotingClassifier(estimators=[
-        ('xgb', xgb_model),
-        ('nn', nn_model)
-    ], voting='soft')
-
-    # Train the ensemble model
-    ensemble_model.fit(X_resampled, y_resampled)
-
-    # Save the trained model
-    joblib.dump(ensemble_model, os.path.join(model_folder_path, "ensemble_frictionjpr.pkl"))
-    st.success("Ensemble model training completed and saved!")
-
-# Define the prediction function
-def predict_ensemble(test_file_path, model_folder_path):
-    def load_test_data(file_path):
-        df = pd.read_excel(file_path)
-        X_test = df.iloc[:, 3:-1].values
-        return df, X_test
-
-    def preprocess_test_data(X_test):
-        scaler = joblib.load(os.path.join(model_folder_path, "scaler_frictionjpr.pkl"))
-        X_test_scaled = scaler.transform(X_test)
-        return X_test_scaled
-
-    def predict(X_test_scaled):
-        nn_model = joblib.load(os.path.join(model_folder_path, "ensemble_frictionjpr.pkl"))
-        predictions = nn_model.predict(X_test_scaled)
-        return predictions
-
-    set_random_seed()
-
-    try:
-        df, X_test = load_test_data(test_file_path)
-        X_test_scaled = preprocess_test_data(X_test)
-        predictions = predict(X_test_scaled)
-
-        breakdown_codes = ["Code 0", "Code 1", "Code 2"]
-        predicted_labels = [breakdown_codes[p] for p in predictions]
-
-        # Check if any non-zero breakdown code (Code 1, 2, or 3) is predicted
-        non_zero_codes = [code for code in predicted_labels if "Code 1" in code or "Code2" in code ]
-        
-        if non_zero_codes:
-            unique_non_zero_codes = set(non_zero_codes)
-            return f"Breakdown of {', '.join(unique_non_zero_codes)} might occur."
-        else:
-            return "No BD predicted"
-    except Exception as e:
-        return f"Error: {e}"
-
-# Streamlit app UI
-st.title("Breakdown Code Classification")
+# ---------------------
+# 🌐 Streamlit UI
+# ---------------------
+st.title("🔮 Predict Breakdown")
 
 
-#...CHNAGED................................................................................................................................................
+if st.button("Predict Breakdown"):
+    if test_file_path:
+        with st.spinner("Predicting..."):
+            result = predict_future_breakdown(test_file_path, model_folder_path)
+            st.subheader("🔍 Result:")
+            st.write(result)
+            st.session_state["bd_output"] = result
+            
+            if result != "✅ No BD predicted":
+                st.session_state["check_bd_clicked"] = True
+            else:
+                st.session_state["check_bd_clicked"] = False
+    else:
+        st.warning("Please upload today's data for prediction.")
 
-if st.button("Check BD Classification"):
-    with st.spinner("Checking breakdown..."):
-        #train_ensemble_model(training_file_path, model_folder_path)  # Train the model
-        result = predict_ensemble(test_file_path, model_folder_path)  # Predict breakdown
-        
-        # Store the result in session state
-        st.session_state["bd_output"] = result
-        
-        # Update session state based on the output
-        if result != "No BD predicted":
-            st.session_state["check_bd_clicked"] = True
-        else:
-            st.session_state["check_bd_clicked"] = False
-    
-    # Display the result
-    st.write(result)
-    st.success("Prediction complete!")
 
 
 
 # ################################        time prediction             #############################
-
 import streamlit as st
 import os
 import pandas as pd
@@ -425,47 +320,9 @@ import numpy as np
 # Function to set random seed for reproducibility
 def set_random_seed(seed=42):
     np.random.seed(seed)
+    
 
-# Define the training function
-def train_model(training_file_path):
-    def load_data(file_path):
-        df = pd.read_excel(file_path, sheet_name="Time")
-        X = df.iloc[:, 1:-2].values
-        y = df.iloc[:, -1].values
-        return X, y
 
-    def preprocess_data(X, y):
-        mask = (y <= 15)# Time to breakdown less than 72 hours
-        X_filtered = X[mask]
-        y_filtered = y[mask]
-        
-        # Use a fixed random_state to ensure reproducibility
-        X_train, X_val, y_train, y_val = train_test_split(X_filtered, y_filtered, test_size=0.01, random_state=42)
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_val_scaled = scaler.transform(X_val)
-        joblib.dump(scaler, os.path.join(model_folder_path, 'scalerfinpv1.pkl'))
-        return X_train_scaled, X_val_scaled, y_train, y_val
-
-    def build_model(input_shape):
-        model = Sequential()
-        model.add(Dense(128, input_dim=input_shape, activation='relu'))
-        model.add(Dense(64, activation='relu'))
-        model.add(Dense(32, activation='relu'))
-        model.add(Dense(1, activation='linear'))
-        model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
-        return model
-
-    # Set random seed for reproducibility
-    set_random_seed()
-
-    X, y = load_data(training_file_path)
-    X_train, X_val, y_train, y_val = preprocess_data(X, y)
-    model = build_model(X_train.shape[1])
-
-    #early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-    model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=100, batch_size=32)
-    model.save(os.path.join(model_folder_path, 'trained_modelFINpv1.h5'))
 
 # Define the prediction function
 def predict_time(test_file_path):
@@ -477,15 +334,15 @@ def predict_time(test_file_path):
         return df, X_test, serial_numbers, times
 
     def preprocess_test_data(X_test):
-        scaler = joblib.load(os.path.join(model_folder_path, 'scalerfinpv1.pkl'))
+        scaler = joblib.load(os.path.join(model_folder_path, 'scaler_time_changed.pkl'))
         X_test_scaled = scaler.transform(X_test)
         return X_test_scaled
 
     def predict_time_to_breakdown(X_test_scaled):
-        model = load_model(os.path.join(model_folder_path, 'trained_modelFINpv1.h5'))
+        model = load_model(os.path.join(model_folder_path, 'trained_time_changed.h5'))
         predictions = model.predict(X_test_scaled)
         return predictions
-        
+
     def calculate_time_difference(times, predictions):
         time_to_breakdown_with_time = []
         base_time = datetime.strptime(times[0],'%I:%M %p')
@@ -496,7 +353,6 @@ def predict_time(test_file_path):
             adjusted_time_to_bd = prediction[0] + time_difference
             time_to_breakdown_with_time.append(adjusted_time_to_bd)
         return time_to_breakdown_with_time
-
     #CHANGE.........................................................................................................................
     def find_minimum_maximum_and_mode_interval(time_to_breakdown_with_time):
         # Filter out negative times
@@ -545,31 +401,14 @@ def predict_time(test_file_path):
         predictions_with_time = calculate_time_difference(times, predictions)
     
         # Find the minimum, maximum, and mode interval
-        min_time, max_time, mode_interval, mode_frequency = find_minimum_maximum_and_mode_interval(predictions_with_time)
-    
-        
-    
-       
-    
-        # Return the final weighted breakdown time
-        # Choose the output based on the condition
-        final_output_time = max(24,min(24 + (0.4*min_time + 0.6*max_time),48))
-        
-
-        
-
-
+        min_time, max_time, mode_interval, mode_frequency = find_minimum_maximum_and_mode_interval(predictions_with_time)    
+        final_output_time = 0.4 * min_time + 0.6 * max_time
         # Return the final breakdown time
         return (f"Breakdown might occur in approximately w.r.t 6 AM Data date: \n"
         f"{final_output_time:.2f} hours")
 
     except Exception as e:
         return f"Error: {e}"
-   
-
-    
-
-
 # Streamlit app UI
 st.title("Time Prediction")
 
@@ -579,16 +418,13 @@ st.title("Time Prediction")
 
 if st.button(("Predict Time"), disabled=not st.session_state["check_bd_clicked"]):
     if st.session_state["bd_output"] == "No BD predicted":
-        st.error("No breakdown predicted. Cannot proceed with time prediction.")
+         st.error("No breakdown predicted. Cannot proceed with time prediction.")
     else:
-        with st.spinner("Training the model and making predictions..."):
-            #train_model(training_file_path)
-            result = predict_time(test_file_path)  # Predict time using predefined test data
-        st.write(f"Predicted Time to Breakdown: {result}")
-        st.success("Prediction complete!")
-
-
-
+         with st.spinner("Training the model and making predictions..."):
+             #train_model(training_file_path)
+             result = predict_time(test_file_path)  # Predict time using predefined test data
+         st.write(f"Predicted Time to Breakdown: {result}")
+         st.success("Prediction complete!")
 
 
 
