@@ -574,6 +574,7 @@ else:
         with st.expander("📊 Show available columns in test data"):
             st.write("Below are the column names found in the test data file:")
             st.code("\n".join(test_df.columns), language="text")
+            
 
 
         if test_df.empty:
